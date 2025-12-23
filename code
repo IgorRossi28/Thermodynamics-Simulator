@@ -1,253 +1,258 @@
 """
-Author: Igor R. Rossigali
-Date: 15/12/2025
-Description:
-Vapor Compression Refrigeration Cycle Simulator
-GUI version with T-s and P-h diagrams
+Vapor Compression Refrigeration Cycle Simulator - Streamlit version
+Author: Igor R. Rossigali (adapted)
+Date: 2025-12-17
+Notes:
+ - Requires CoolProp (PropsSI)
+ - Plots use matplotlib and are shown with st.pyplot
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox
+import streamlit as st
+import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from CoolProp.CoolProp import PropsSI
 
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+st.set_page_config(page_title="Vapor Compression Cycle Simulator", layout="wide")
 
-# ================================================================
-# MAIN WINDOW
-# ================================================================
-root = tk.Tk()
-root.title("Vapor Compression Refrigeration Cycle")
-root.geometry("1200x800")
+left_spacer, center_col, right_spacer = st.columns([1, 10, 1])
 
-main = ttk.Frame(root, padding=10)
-main.pack(fill="both", expand=True)
+with center_col:
+    st.title("Vapor Compression Refrigeration Cycle")
 
-# ================================================================
-# TK VARIABLES
-# ================================================================
-refrigerant = tk.StringVar(value="R134a")
 
-vol_water = tk.DoubleVar(value=50.0)
-rho_water = tk.DoubleVar(value=1000.0)
-t0_water = tk.DoubleVar(value=20.0)
-tf_water = tk.DoubleVar(value=5.0)
-time_cool = tk.DoubleVar(value=3600.0)
+# ---------------------------------------------------------------------
+# Sidebar: inputs (mimics your Tk inputs)
+# ---------------------------------------------------------------------
+with st.sidebar.form(key="inputs_form"):
+    st.subheader("Cycle inputs")
 
-eff_hx = tk.DoubleVar(value=0.8)
-m_dot_hot = tk.DoubleVar(value=0.2)
-m_dot_water = tk.DoubleVar(value=0.2)
-cp_hot = tk.DoubleVar(value=4180.0)
-deltaT_hx = tk.DoubleVar(value=5.0)
+    refrigerant = st.selectbox("Refrigerant", options=["R134a", "R245fa", "R1234yf", "R22", "R410A"], index=0)
 
-t_amb = tk.DoubleVar(value=30.0)
-deltaT_evap = tk.DoubleVar(value=5.0)
-deltaT_cond = tk.DoubleVar(value=8.0)
+    vol_water = st.number_input("Water Volume [L]", value=50.0, format="%.3f")
+    rho_water = st.number_input("Water Density [kg/m³]", value=1000.0, format="%.3f")
+    t0_water = st.number_input("Initial Water Temperature [°C]", value=20.0, format="%.3f")
+    tf_water = st.number_input("Final Water Temperature [°C]", value=5.0, format="%.3f")
+    time_cool = st.number_input("Cooling Time [s]", value=3600.0, format="%.3f")
 
-eff_comp = tk.DoubleVar(value=0.85)
+    st.markdown("---")
+    st.subheader("Heat exchanger / fluids")
+    eff_hx = st.number_input("Heat Exchanger Efficiency [-]", value=0.80, format="%.3f")
+    m_dot_hot = st.number_input("Hot Fluid Mass Flow [kg/s]", value=0.20, format="%.4f")
+    m_dot_water = st.number_input("Water Mass Flow [kg/s]", value=0.20, format="%.4f")
+    cp_hot = st.number_input("Hot Fluid Cp [J/kg.K]", value=4180.0, format="%.1f")
+    deltaT_hx = st.number_input("ΔT Heat Exchanger [°C]", value=5.0, format="%.3f")
 
-cp_water = 4180.0  # J/kg.K
+    st.markdown("---")
+    st.subheader("Ambient & refrigerant temps")
+    t_amb = st.number_input("Ambient Temperature [°C]", value=30.0, format="%.3f")
+    deltaT_evap = st.number_input("ΔT Evaporator [°C]", value=5.0, format="%.3f")
+    deltaT_cond = st.number_input("ΔT Condenser [°C]", value=8.0, format="%.3f")
 
-# ================================================================
-# INPUT FORM
-# ================================================================
-row = 0
-def add_input(label, var):
-    global row
-    ttk.Label(main, text=label).grid(row=row, column=0, sticky="w")
-    ttk.Entry(main, textvariable=var, width=15).grid(row=row, column=1, sticky="ew")
-    row += 1
+    st.markdown("---")
+    eff_comp = st.number_input("Compressor Efficiency (isentropic) [-]", value=0.85, format="%.3f")
 
-add_input("Refrigerant", refrigerant)
-add_input("Water Volume [L]", vol_water)
-add_input("Water Density [kg/m³]", rho_water)
-add_input("Initial Water Temperature [°C]", t0_water)
-add_input("Final Water Temperature [°C]", tf_water)
-add_input("Cooling Time [s]", time_cool)
+    submitted = st.form_submit_button("Run Simulation")
 
-ttk.Separator(main).grid(row=row, columnspan=2, sticky="ew", pady=5)
-row += 1
+# ---------------------------------------------------------------------
+# Main: on submit run simulation and display outputs
+# ---------------------------------------------------------------------
+cp_water_const = 4180.0  # J/kg.K (used in original code)
 
-add_input("Heat Exchanger Efficiency [-]", eff_hx)
-add_input("Hot Fluid Mass Flow [kg/s]", m_dot_hot)
-add_input("Water Mass Flow [kg/s]", m_dot_water)
-add_input("Hot Fluid Cp [J/kg.K]", cp_hot)
-add_input("ΔT Heat Exchanger [°C]", deltaT_hx)
+def run_cycle():
+    # defensive checks
+    if time_cool <= 0:
+        raise ValueError("Cooling time must be > 0 s.")
+    if eff_comp <= 0 or eff_comp > 1.5:
+        raise ValueError("Compressor efficiency must be positive and physically reasonable.")
+    # ----------------------------
+    # Thermal Load 
+    # ----------------------------
+    mass_water = vol_water * (1/1000) * rho_water                          # kg 
+    Q_water = mass_water * cp_water_const * (t0_water - tf_water)         # J
+    Q_dot_water = Q_water / time_cool                                     # W
 
-ttk.Separator(main).grid(row=row, columnspan=2, sticky="ew", pady=5)
-row += 1
+    Ch = m_dot_hot * cp_hot
+    Cc = m_dot_water * cp_water_const
+    Cmin = min(Ch, Cc)
 
-add_input("Ambient Temperature [°C]", t_amb)
-add_input("ΔT Evaporator [°C]", deltaT_evap)
-add_input("ΔT Condenser [°C]", deltaT_cond)
+    Q_dot_hx = eff_hx * Cmin * deltaT_hx
+    Q_dot_total = Q_dot_water + Q_dot_hx
 
-# ================================================================
-# STATE TABLE
-# ================================================================
-table_frame = ttk.LabelFrame(main, text="Thermodynamic States")
-table_frame.grid(row=0, column=2, rowspan=14, padx=20, sticky="n")
+    # ----------------------------
+    # Temperatures (evap/cond)
+    # ----------------------------
+    t_evap = tf_water - deltaT_evap
+    t_cond = t_amb + deltaT_cond
 
-columns = ("State", "T [°C]", "P [MPa]", "h [kJ/kg]", "s [kJ/kg.K]", "x")
+    T1 = t_evap + 273.15
+    T3 = t_cond + 273.15
 
-state_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=6)
-for col in columns:
-    state_table.heading(col, text=col)
-    state_table.column(col, width=95, anchor="center")
+    # ----------------------------
+    # Thermodynamic states with CoolProp (SI units)
+    # ----------------------------
+    # P in Pa, h in J/kg, s in J/kg.K, T in K
+    P1 = PropsSI("P", "T", T1, "Q", 1, refrigerant)
+    P3 = PropsSI("P", "T", T3, "Q", 0, refrigerant)
 
-state_table.pack(fill="x", padx=5, pady=5)
+    h1 = PropsSI("H", "P", P1, "Q", 1, refrigerant)
+    s1 = PropsSI("S", "P", P1, "Q", 1, refrigerant)
 
-# ================================================================
-# SUMMARY
-# ================================================================
-summary_frame = ttk.LabelFrame(main, text="Cycle Summary")
-summary_frame.grid(row=14, column=2, padx=20, sticky="ew")
+    # isentropic compression to condenser pressure P3
+    h2s = PropsSI("H", "P", P3, "S", s1, refrigerant)
+    # account for compressor isentropic efficiency (eff_comp)
+    h2 = h1 + (h2s - h1) / eff_comp
+    T2 = PropsSI("T", "P", P3, "H", h2, refrigerant)
+    s2 = PropsSI("S", "P", P3, "H", h2, refrigerant)
 
-summary_label = ttk.Label(summary_frame, font=("Courier New", 10), justify="left")
-summary_label.pack(padx=10, pady=5)
+    h3 = PropsSI("H", "P", P3, "Q", 0, refrigerant)
+    s3 = PropsSI("S", "P", P3, "Q", 0, refrigerant)
 
-# ================================================================
-# PLOTS FRAME
-# ================================================================
-plots_frame = ttk.LabelFrame(main, text="Thermodynamic Diagrams")
-plots_frame.grid(row=15, column=2, padx=20, pady=10, sticky="nsew")
+    h4 = h3
+    P4 = P1
+    T4 = PropsSI("T", "P", P4, "H", h4, refrigerant)
+    s4 = PropsSI("S", "P", P4, "H", h4, refrigerant)
+    x4 = round(PropsSI("Q", "P", P4, "H", h4, refrigerant),5)
 
-# ================================================================
-# PLOTTING FUNCTION
-# ================================================================
-def plot_diagrams(states):
-    for widget in plots_frame.winfo_children():
-        widget.destroy()
+    # ----------------------------
+    # Mass flow & power (units consistent)
+    # ----------------------------
+    # h [J/kg], Q_dot_total [W], so m_dot_ref [kg/s]
+    denom = (h1 - h4)
+    if denom == 0:
+        raise ValueError("Calculated enthalpy difference (h1-h4) is zero: check inputs and refrigerant state.")
+    m_dot_ref = Q_dot_total / denom
+    W_comp = m_dot_ref * (h2 - h1)
+    Q_cond = m_dot_ref * (h2 - h3)
 
-    # Cycle closure
-    s_vals = [s[4] for s in states] + [states[0][4]]
-    T_vals = [s[1] + 273.15 for s in states] + [states[0][1] + 273.15]
-    h_vals = [s[3] for s in states] + [states[0][3]]
-    P_vals = [s[2] * 1e6 for s in states] + [states[0][2] * 1e6]
+    # build states table (convert to user-friendly units: T °C, P MPa, h kJ/kg, s kJ/kg.K)
+    states = [
+        {"State": "1", "T [°C]": T1 - 273.15, "P [MPa]": P1 * 1e-6, "h [kJ/kg]": h1 * 1e-3, "s [kJ/kg.K]": s1 * 1e-3, "x": 1.0},
+        {"State": "2", "T [°C]": T2 - 273.15, "P [MPa]": P3 * 1e-6, "h [kJ/kg]": h2 * 1e-3, "s [kJ/kg.K]": s2 * 1e-3, "x": "-"},
+        {"State": "3", "T [°C]": T3 - 273.15, "P [MPa]": P3 * 1e-6, "h [kJ/kg]": h3 * 1e-3, "s [kJ/kg.K]": s3 * 1e-3, "x": 0.0},
+        {"State": "4", "T [°C]": T4 - 273.15, "P [MPa]": P4 * 1e-6, "h [kJ/kg]": h4 * 1e-3, "s [kJ/kg.K]": s4 * 1e-3, "x": x4},
+    ]
+    results = {
+        "states_df": pd.DataFrame(states),
+        "m_dot_ref": m_dot_ref,
+        "W_comp": W_comp,
+        "Q_dot_total": Q_dot_total,
+        "Q_cond": Q_cond,
+        "raw": {
+            "P1": P1, "P3": P3, "h1": h1, "h2": h2, "h3": h3, "h4": h4,
+            "s1": s1, "s2": s2, "s3": s3, "s4": s4
+        }
+    }
+    return results
 
-    # T-s
-    fig_ts, ax_ts = plt.subplots(figsize=(4.5, 3))
-    ax_ts.plot(s_vals, T_vals, marker="o")
-    ax_ts.set_xlabel("Entropy [kJ/kg.K]")
-    ax_ts.set_ylabel("Temperature [K]")
-    ax_ts.set_title("T-s Diagram")
-    ax_ts.grid(True)
-
-    canvas_ts = FigureCanvasTkAgg(fig_ts, plots_frame)
-    canvas_ts.draw()
-    canvas_ts.get_tk_widget().grid(row=0, column=0, padx=5)
-
-    # P-h
-    fig_ph, ax_ph = plt.subplots(figsize=(4.5, 3))
-    ax_ph.plot(h_vals, P_vals, marker="o")
-    ax_ph.set_xlabel("Enthalpy [kJ/kg]")
-    ax_ph.set_ylabel("Pressure [Pa]")
-    ax_ph.set_yscale("log")
-    ax_ph.set_title("P-h Diagram")
-    ax_ph.grid(True)
-
-    canvas_ph = FigureCanvasTkAgg(fig_ph, plots_frame)
-    canvas_ph.draw()
-    canvas_ph.get_tk_widget().grid(row=0, column=1, padx=5)
-
-# ================================================================
-# SIMULATION FUNCTION
-# ================================================================
-def run_simulation():
+if submitted:
     try:
-        for i in state_table.get_children():
-            state_table.delete(i)
+        res = run_cycle()
 
-        # ----------------------------
-        # Thermal Load
-        # ----------------------------
-        Q_water = m_dot_water.get() * cp_water * (tf_water.get() - t0_water.get())
-        Q_dot_water = Q_water / time_cool.get()
+        # =========================
+        # THERMODYNAMIC STATES
+        # =========================
+        st.markdown(
+            "<h2 style='text-align: center;'>Thermodynamic States</h2>",
+            unsafe_allow_html=True
+        )
 
-        Ch = m_dot_hot.get() * cp_hot.get()
-        Cc = m_dot_water.get() * cp_water
-        Cmin = min(Ch, Cc)
+        center_left, center_mid, center_right = st.columns([1, 3, 1])
+        with center_mid:
+            st.dataframe(
+                res["states_df"].set_index("State"),
+                use_container_width=True
+            )
 
-        Q_dot_hx = eff_hx.get() * Cmin * deltaT_hx.get()
-        Q_dot_total = Q_dot_water + Q_dot_hx
+        st.markdown("---")
 
-        # ----------------------------
-        # Temperatures
-        # ----------------------------
-        t_evap = tf_water.get() - deltaT_evap.get()
-        t_cond = t_amb.get() + deltaT_cond.get()
+        # =========================
+        # CYCLE SUMMARY
+        # =========================
+        st.markdown(
+            "<h2 style='text-align: center;'>Cycle Summary</h2>",
+            unsafe_allow_html=True
+        )
 
-        T1 = t_evap + 273.15
-        T3 = t_cond + 273.15
-
-        # ----------------------------
-        # Pressures
-        # ----------------------------
-        P1 = PropsSI("P", "T", T1, "Q", 1, refrigerant.get())
-        P3 = PropsSI("P", "T", T3, "Q", 0, refrigerant.get())
-
-        # ----------------------------
-        # States
-        # ----------------------------
-        h1 = PropsSI("H", "P", P1, "Q", 1, refrigerant.get())
-        s1 = PropsSI("S", "P", P1, "Q", 1, refrigerant.get())
-
-        h2s = PropsSI("H", "P", P3, "S", s1, refrigerant.get())
-        h2 = h1 + (h2s - h1) / eff_comp.get()
-        T2 = PropsSI("T", "P", P3, "H", h2, refrigerant.get())
-        s2 = PropsSI("S", "P", P3, "H", h2, refrigerant.get())
-
-        h3 = PropsSI("H", "P", P3, "Q", 0, refrigerant.get())
-        s3 = PropsSI("S", "P", P3, "Q", 0, refrigerant.get())
-
-        h4 = h3
-        P4 = P1
-        T4 = PropsSI("T", "P", P4, "H", h4, refrigerant.get())
-        s4 = PropsSI("S", "P", P4, "H", h4, refrigerant.get())
-        x4 = PropsSI("Q", "P", P4, "H", h4, refrigerant.get())
-
-        # ----------------------------
-        # Mass Flow & Powers
-        # ----------------------------
-        m_dot_ref = Q_dot_total / (h1 - h4)
-        W_comp = m_dot_ref * (h2 - h1)
-        Q_cond = m_dot_ref * (h2 - h3)
-
-        states = [
-            ("1", T1-273.15, P1*1e-6, h1*1e-3, s1*1e-3, 1.0),
-            ("2", T2-273.15, P3*1e-6, h2*1e-3, s2*1e-3, "-"),
-            ("3", T3-273.15, P3*1e-6, h3*1e-3, s3*1e-3, 0.0),
-            ("4", T4-273.15, P4*1e-6, h4*1e-3, s4*1e-3, x4),
-        ]
-
-        for st in states:
-            state_table.insert("", "end", values=(
-                st[0], f"{st[1]:.2f}", f"{st[2]:.3f}",
-                f"{st[3]:.2f}", f"{st[4]:.4f}", f"{st[5]}"
-            ))
-
-        summary_label.config(
-            text=
+        summary_text = (
             "============================================\n"
             " VAPOR COMPRESSION CYCLE SUMMARY\n"
             "============================================\n"
-            f"Refrigerant mass flow : {m_dot_ref:10.5f} kg/s\n"
-            f"Compressor power      : {W_comp:10.1f} W\n"
-            f"Evaporator load       : {Q_dot_total:10.1f} W\n"
-            f"Condenser heat        : {Q_cond:10.1f} W\n"
+            f"Refrigerant            : {refrigerant}\n"
+            f"Refrigerant mass flow  : {res['m_dot_ref']:.6f} kg/s\n"
+            f"Compressor power       : {res['W_comp']:.1f} W\n"
+            f"Evaporator load (Q̇)   : {res['Q_dot_total']:.1f} W\n"
+            f"Condenser heat (Q̇)    : {res['Q_cond']:.1f} W\n"
             "============================================"
         )
 
-        plot_diagrams(states)
+        center_left, center_mid, center_right = st.columns([1, 3, 1])
+        with center_mid:
+            st.code(summary_text, language="text")
+
+        st.markdown("---")
+
+        # =========================
+        # THERMODYNAMIC DIAGRAMS
+        # =========================
+        st.markdown(
+            "<h2 style='text-align: center;'>Thermodynamic Diagrams</h2>",
+            unsafe_allow_html=True
+        )
+
+        # T-s diagram
+        fig_ts, ax_ts = plt.subplots(figsize=(7, 4))
+        s_plot = res["states_df"]["s [kJ/kg.K]"].tolist()
+        s_plot.append(s_plot[0])
+
+        T_plot = res["states_df"]["T [°C]"].tolist()
+        T_plot.append(T_plot[0])
+        T_plot_K = [t + 273.15 for t in T_plot]
+
+        ax_ts.plot(s_plot, T_plot_K, marker="o")
+        ax_ts.set_xlabel("Entropy [kJ/kg.K]")
+        ax_ts.set_ylabel("Temperature [K]")
+        ax_ts.set_title("T–s Diagram")
+        ax_ts.grid(True)
+        fig_ts.tight_layout()
+
+        # P-h diagram
+        fig_ph, ax_ph = plt.subplots(figsize=(7, 4))
+        h_plot = res["states_df"]["h [kJ/kg]"].tolist()
+        h_plot.append(h_plot[0])
+
+        P_plot = res["states_df"]["P [MPa]"].tolist()
+        P_plot.append(P_plot[0])
+        P_plot_Pa = [p * 1e6 for p in P_plot]
+
+        ax_ph.plot(h_plot, P_plot_Pa, marker="o")
+        ax_ph.set_xlabel("Enthalpy [kJ/kg]")
+        ax_ph.set_ylabel("Pressure [Pa]")
+        ax_ph.set_yscale("log")
+        ax_ph.set_title("P–h Diagram")
+        ax_ph.grid(True, which="both", ls="--")
+        fig_ph.tight_layout()
+
+        center_left, center_mid, center_right = st.columns([1, 3, 1])
+        with center_mid:
+            st.pyplot(fig_ts)
+            st.pyplot(fig_ph)
 
     except Exception as e:
-        messagebox.showerror("Simulation Error", str(e))
+        st.error(f"Simulation error: {e}")
 
-# ================================================================
-# RUN BUTTON
-# ================================================================
-ttk.Button(main, text="Run Simulation", command=run_simulation).grid(
-    row=row+1, column=0, columnspan=2, pady=10
-)
+else:
+    left_spacer, center_col, right_spacer = st.columns([1, 2, 1])
+    
+    st.info("Set inputs in the sidebar and press **Run Simulation**.")
 
-root.mainloop()
+    st.markdown(
+            """
+            This app reproduces the Vapor Compression Refrigeration Cycle calculation sequence as the simulator.
+
+            - Computes thermal load contributions (water cooling + heat exchanger)
+            - Determines evaporator and condenser temperatures and pressures using CoolProp
+            - Computes compressor work and refrigerant mass flow
+            - Presents thermodynamic states and T–s and P–h diagrams
+            """
+        )
